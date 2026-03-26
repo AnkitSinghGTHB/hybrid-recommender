@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Hybrid Recommender System — Content-Based + Collaborative + NLP Sentiment Analysis">
+    <title>Hybrid Recommender System</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+    <!-- ─── Header ─── -->
+    <header class="header">
+        <div class="header-inner">
+            <div class="logo">
+                <span class="logo-icon">◈</span>
+                <h1>Hybrid<span class="accent">Rec</span></h1>
+            </div>
+
+            <div class="header-search hidden" id="search-section">
+                <div class="search-box">
+                    <span class="search-icon">🔎</span>
+                    <input type="text" id="search-input" placeholder="Search across products..." autocomplete="off">
+                    <div class="search-spinner hidden" id="search-spinner"></div>
+                </div>
+                <div class="search-results hidden" id="search-results"></div>
+            </div>
+
+            <div class="status-pill" id="status-pill">
+                <span class="status-dot"></span>
+                <span id="status-text">No Data</span>
+            </div>
+        </div>
+    </header>
+
+    <main class="container">
+
+
+
+        <!-- ─── Top Row: Import & Weights ─── -->
+        <div class="top-row">
+            <!-- ─── Section 1: Dataset Manager ─── -->
+            <section class="card" id="dataset-section">
+                <div class="card-header">
+                    <h2>📂 Dataset Manager</h2>
+                    <button class="btn btn-sm btn-ghost" id="toggle-datasets">▼</button>
+                </div>
+                <div class="card-body" id="dataset-body">
+                    <!-- Upload area -->
+                    <div class="upload-zone" id="upload-zone">
+                        <div class="upload-icon">⬆</div>
+                        <p>Drag & drop CSV files here, or <label for="file-input" class="upload-link">browse</label></p>
+                        <input type="file" id="file-input" accept=".csv" multiple hidden>
+                        <p class="upload-hint">Supports multiple datasets simultaneously</p>
+                    </div>
+
+                    <!-- Loading -->
+                    <div class="upload-progress hidden" id="upload-progress">
+                        <div class="spinner"></div>
+                        <span>Processing...</span>
+                    </div>
+
+                    <!-- Dataset list -->
+                    <div class="dataset-list" id="dataset-list"></div>
+
+                    <!-- Stats bar -->
+                    <div class="stats-bar hidden" id="stats-bar">
+                        <div class="stat">
+                            <span class="stat-value" id="stat-datasets">0</span>
+                            <span class="stat-label">Datasets</span>
+                        </div>
+                        <div class="stat">
+                            <span class="stat-value" id="stat-rows">0</span>
+                            <span class="stat-label">Total Rows</span>
+                        </div>
+                        <div class="stat">
+                            <span class="stat-value" id="stat-items">—</span>
+                            <span class="stat-label">Items</span>
+                        </div>
+                        <button class="btn btn-primary" id="build-btn">
+                            <span class="btn-icon">⚡</span> Build Models
+                        </button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- ─── Section 2: Weight Sliders ─── -->
+            <section class="card hidden" id="weights-section">
+                <div class="card-header">
+                    <h2>⚖️ Score Weights</h2>
+                </div>
+                <div class="card-body weights-grid">
+                    <div class="weight-control">
+                        <label>α Content-Based</label>
+                        <input type="range" id="weight-alpha" min="0" max="100" value="40">
+                        <span class="weight-val" id="val-alpha">0.40</span>
+                    </div>
+                    <div class="weight-control">
+                        <label>β Collaborative</label>
+                        <input type="range" id="weight-beta" min="0" max="100" value="35">
+                        <span class="weight-val" id="val-beta">0.35</span>
+                    </div>
+                    <div class="weight-control">
+                        <label>γ Sentiment</label>
+                        <input type="range" id="weight-gamma" min="0" max="100" value="25">
+                        <span class="weight-val" id="val-gamma">0.25</span>
+                    </div>
+                </div>
+            </section>
+        </div>
+
+        <!-- ─── Section 4: Recommendations ─── -->
+        <section class="card hidden" id="rec-section">
+            <div class="card-header">
+                <h2>✨ Recommendations</h2>
+                <span class="rec-query" id="rec-query"></span>
+            </div>
+            <div class="card-body">
+                <div class="rec-grid" id="rec-grid"></div>
+            </div>
+        </section>
+
+    </main>
+
+    <!-- ─── Toast ─── -->
+    <div class="toast-container" id="toast-container"></div>
+
+    <footer class="footer">
+        <p>Hybrid Recommender System — Content-Based + Collaborative + NLP Sentiment Analysis</p>
+    </footer>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>

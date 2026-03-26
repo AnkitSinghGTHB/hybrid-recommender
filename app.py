@@ -34,6 +34,9 @@ if uploaded_file:
     hybrid_model = HybridRecommender(content_model, collab_model)
 
     item_list = adapted_df['title'].dropna().unique()
+    # Limit selectbox options to prevent browser OOM with huge datasets
+    if len(item_list) > 100:
+        item_list = item_list[:100]
     selected_item = st.selectbox("Select Item", item_list)
 
     if st.button("Recommend"):
