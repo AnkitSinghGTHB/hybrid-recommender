@@ -1,3 +1,8 @@
+"""
+Data Adapter — Unified schema adapter for CSV and JSON datasets.
+Detects columns automatically and normalizes to a standard schema
+used by all recommender models.
+"""
 import pandas as pd
 import numpy as np
 
@@ -12,7 +17,7 @@ def detect_column(columns, keywords):
 
 
 def validate_dataframe(df):
-    """Check that a DataFrame has the minimum required data for recommendation."""
+    """Check that a DataFrame has the minimum required data."""
     if df.empty:
         raise ValueError("DataFrame is empty.")
     if len(df.columns) < 2:
@@ -20,10 +25,54 @@ def validate_dataframe(df):
     return True
 
 
+def read_file(path_or_buffer, file_format=None):
+    """
+    Read a CSV or JSON file into a DataFrame.
+    Auto-detects format from extension if not specified.
+    Supports: .csv, .json (records or lines format).
+    """
+    if file_format is None and isinstance(path_or_buffer, str):
+        if path_or_buffer.lower().endswith('.json'):
+            file_format = 'json'
+        else:
+            file_format = 'csv'
+
+    if file_format == 'json':
+        try:
+            df = pd.read_json(path_or_buffer, lines=True)
+        except ValueError:
+            if hasattr(path_or_buffer, 'seek'):
+                path_or_buffer.seek(0)
+            df = pd.read_json(path_or_buffer)
+    else:
+        # Try multiple encodings for CSV compatibility
+        for encoding in ['utf-8', 'latin-1', 'cp1252']:
+            try:
+                if hasattr(path_or_buffer, 'seek'):
+                    path_or_buffer.seek(0)
+                df = pd.read_csv(
+                    path_or_buffer, on_bad_lines='skip',
+                    low_memory=False, encoding=encoding,
+                )
+                break
+            except (UnicodeDecodeError, UnicodeError):
+                continue
+        else:
+            # Last resort: read with errors='replace'
+            if hasattr(path_or_buffer, 'seek'):
+                path_or_buffer.seek(0)
+            df = pd.read_csv(
+                path_or_buffer, on_bad_lines='skip',
+                low_memory=False, encoding='utf-8', encoding_errors='replace',
+            )
+
+    return df
+
+
 def adapt_data(df):
     """
-    Adapt any CSV DataFrame into the unified schema used by the recommender.
-    
+    Adapt any DataFrame into the unified schema used by the recommender.
+
     Detected columns:
       - title / name         → 'title'
       - description / summary → 'description'
@@ -34,13 +83,12 @@ def adapt_data(df):
       - item_id / product_id → 'item_id'
       - clicks / views       → 'views'
       - purchases / orders   → 'purchases'
-    
+
     Returns: (adapted_df, meta_dict)
     """
     validate_dataframe(df)
     columns = df.columns
 
-    # --- Detect columns ---
     title_col    = detect_column(columns, ['title', 'name', 'product_name', 'item_name'])
     desc_col     = detect_column(columns, ['desc', 'summary', 'overview', 'about'])
     user_col     = detect_column(columns, ['user_id', 'user', 'reviewer', 'customer'])
@@ -53,7 +101,6 @@ def adapt_data(df):
 
     df = df.copy()
 
-    # --- Rename detected columns ---
     rename_map = {}
     if title_col:    rename_map[title_col]    = 'title'
     if desc_col:     rename_map[desc_col]     = 'description'
@@ -67,52 +114,44 @@ def adapt_data(df):
 
     df = df.rename(columns=rename_map)
 
-    # --- Fill missing safely ---
-    # Title
+    # Fill missing safely
     if 'title' in df.columns:
         df['title'] = df['title'].fillna('Unknown')
     else:
         df['title'] = df.iloc[:, 0].astype(str)
 
-    # Description
     if 'description' in df.columns:
         df['description'] = df['description'].fillna('')
     else:
         df['description'] = ''
 
-    # Category
     if 'category' not in df.columns:
         df['category'] = ''
     else:
         df['category'] = df['category'].fillna('')
 
-    # Item ID
     if 'item_id' not in df.columns:
         df['item_id'] = range(len(df))
 
-    # Review text
     if 'review_text' in df.columns:
         df['review_text'] = df['review_text'].fillna('')
     else:
         df['review_text'] = ''
 
-    # Rating
     if 'rating' in df.columns:
         df['rating'] = pd.to_numeric(df['rating'], errors='coerce').fillna(0)
     else:
         df['rating'] = 0.0
 
-    # User
     if 'user_id' not in df.columns:
         df['user_id'] = 'anonymous'
 
-    # Behavior
     if 'views' not in df.columns:
         df['views'] = 0
     if 'purchases' not in df.columns:
         df['purchases'] = 0
 
-    # --- Combined text feature for content-based model ---
+    # Combined text feature for content-based model
     df['combined'] = (
         df['title'].astype(str) + ' ' +
         df['description'].astype(str) + ' ' +

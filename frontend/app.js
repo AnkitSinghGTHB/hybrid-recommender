@@ -1,457 +1,656 @@
-/* ═══════════════════════════════════════════════════════════════
-   Hybrid Recommender — Frontend Application Logic
-   ═══════════════════════════════════════════════════════════════ */
+/**
+ * HybridRec — Frontend Application v3
+ * Supabase Auth + PostgreSQL FTS Search + Modern UI
+ */
 
-const API = '';  // same origin
+// ── Supabase Client ─────────────────────────────────────────────────
+// Loaded dynamically from backend — no hardcoded credentials
+let sbClient = null;
 
-// ── State ────────────────────────────────────────────────────────
-let datasets = [];
-let modelsReady = false;
-let debounceTimer = null;
+async function initSupabase() {
+    try {
+        const resp = await fetch('/api/config');
+        if (!resp.ok) return null;
+        const config = await resp.json();
+        const { createClient } = window.supabase || {};
+        if (createClient && config.supabase_url && config.supabase_anon_key) {
+            sbClient = createClient(config.supabase_url, config.supabase_anon_key);
+        }
+    } catch (e) {
+        console.warn('Supabase init skipped:', e.message);
+    }
+    return sbClient;
+}
 
-// ── DOM refs ─────────────────────────────────────────────────────
-const $  = (sel) => document.querySelector(sel);
-const $$ = (sel) => document.querySelectorAll(sel);
+// ── State ───────────────────────────────────────────────────────────
+const state = {
+    user: null,
+    isGuest: true,
+    products: [],
+    page: 1,
+    perPage: 20,
+    totalProducts: 0,
+    searchTimer: null,
+    searchResults: [],
+    selectedSearchIdx: -1,
+    isAuthSignUp: false,
+    modelReady: false,
+};
 
-const statusPill    = $('#status-pill');
-const statusText    = $('#status-text');
-const uploadZone    = $('#upload-zone');
-const fileInput     = $('#file-input');
-const uploadProgress = $('#upload-progress');
-const datasetList   = $('#dataset-list');
-const statsBar      = $('#stats-bar');
-const buildBtn      = $('#build-btn');
-const searchSection = $('#search-section');
-const weightsSection = $('#weights-section');
-const recSection    = $('#rec-section');
-const searchInput   = $('#search-input');
-const searchSpinner = $('#search-spinner');
-const searchResults = $('#search-results');
-const recGrid       = $('#rec-grid');
-const recQuery      = $('#rec-query');
-const toastContainer = $('#toast-container');
+// ── DOM Elements ────────────────────────────────────────────────────
+const $ = (id) => document.getElementById(id);
 
-// ── Init ─────────────────────────────────────────────────────────
-document.addEventListener('DOMContentLoaded', () => {
-    setupUpload();
-    setupSearch();
-    setupWeights();
-    setupToggle();
-    checkStatus();
-});
+const els = {
+    searchInput: $('search-input'),
+    searchDropdown: $('search-dropdown'),
+    searchShortcut: $('search-shortcut'),
+    authBtn: $('auth-btn'),
+    authLabel: $('auth-label'),
+    authModal: $('auth-modal'),
+    authForm: $('auth-form'),
+    authEmail: $('auth-email'),
+    authPassword: $('auth-password'),
+    authSubmit: $('auth-submit'),
+    authError: $('auth-error'),
+    authToggleBtn: $('auth-toggle-btn'),
+    authToggleText: $('auth-toggle-text'),
+    modalTitle: $('modal-title'),
+    modalClose: $('modal-close'),
+    statusDot: $('status-dot'),
+    statusText: $('status-text'),
+    uploadBtn: $('upload-btn'),
+    buildBtn: $('build-btn'),
+    fileInput: $('file-input'),
+    productGrid: $('product-grid'),
+    productsTitle: $('products-title'),
+    productCount: $('product-count'),
+    skeletonLoader: $('skeleton-loader'),
+    loadMoreBtn: $('load-more-btn'),
+    loadMoreContainer: $('load-more-container'),
+    recsSection: $('recs-section'),
+    recsStrip: $('recs-strip'),
+    toastContainer: $('toast-container'),
+    weightAlpha: $('weight-alpha'),
+    weightBeta: $('weight-beta'),
+    weightGamma: $('weight-gamma'),
+};
 
-// ── Toast ────────────────────────────────────────────────────────
-function toast(msg, type='info') {
+// ── Utilities ───────────────────────────────────────────────────────
+function toast(message, type = 'info') {
     const el = document.createElement('div');
-    el.className = `toast toast-${type}`;
-    el.textContent = msg;
-    toastContainer.appendChild(el);
-    setTimeout(() => { el.style.opacity = '0'; setTimeout(() => el.remove(), 400); }, 3500);
+    el.className = `toast ${type}`;
+    el.textContent = message;
+    els.toastContainer.appendChild(el);
+    setTimeout(() => {
+        el.style.opacity = '0';
+        el.style.transform = 'translateX(100%)';
+        el.style.transition = '300ms ease';
+        setTimeout(() => el.remove(), 300);
+    }, 3500);
 }
 
-// ── Status ───────────────────────────────────────────────────────
-async function checkStatus() {
-    try {
-        const res = await fetch(`${API}/api/status`);
-        const data = await res.json();
-        updateStatus(data.status === 'ready');
-    } catch(e) { /* server not up yet */ }
-}
-
-function updateStatus(ready) {
-    modelsReady = ready;
-    statusText.textContent = ready ? 'Models Ready' : 'No Data';
-    statusPill.classList.toggle('ready', ready);
-    searchSection.classList.toggle('hidden', !ready);
-    weightsSection.classList.toggle('hidden', !ready);
-    if (!ready) recSection.classList.add('hidden');
-    if (ready) searchItems('');
-}
-
-// ── Upload ───────────────────────────────────────────────────────
-function setupUpload() {
-    // Click
-    uploadZone.addEventListener('click', () => fileInput.click());
-
-    // File pick
-    fileInput.addEventListener('change', (e) => {
-        if (e.target.files.length) uploadFiles(e.target.files);
-    });
-
-    // Drag & drop
-    uploadZone.addEventListener('dragover', (e) => { e.preventDefault(); uploadZone.classList.add('dragover'); });
-    uploadZone.addEventListener('dragleave', () => uploadZone.classList.remove('dragover'));
-    uploadZone.addEventListener('drop', (e) => {
-        e.preventDefault();
-        uploadZone.classList.remove('dragover');
-        if (e.dataTransfer.files.length) uploadFiles(e.dataTransfer.files);
-    });
-
-    // Build button
-    buildBtn.addEventListener('click', buildModels);
-}
-
-async function uploadFiles(files) {
-    uploadProgress.classList.remove('hidden');
-
-    for (const file of files) {
-        const form = new FormData();
-        form.append('file', file);
-        try {
-            const res = await fetch(`${API}/api/upload`, { method: 'POST', body: form });
-            if (!res.ok) { const e = await res.json(); throw new Error(e.detail || 'Upload failed'); }
-            const data = await res.json();
-            datasets = data.datasets;
-            toast(`Loaded: ${file.name}`, 'success');
-        } catch(e) {
-            toast(`Error: ${e.message}`, 'error');
-        }
-    }
-
-    uploadProgress.classList.add('hidden');
-    renderDatasets();
-}
-
-function renderDatasets() {
-    datasetList.innerHTML = '';
-    if (!datasets.length) {
-        statsBar.classList.add('hidden');
-        return;
-    }
-    statsBar.classList.remove('hidden');
-
-    let totalRows = 0;
-    datasets.forEach((ds, i) => {
-        totalRows += ds.rows;
-        const el = document.createElement('div');
-        el.className = 'dataset-item';
-        el.style.animationDelay = `${i * 0.08}s`;
-
-        const badges = [];
-        if (ds.has_reviews) badges.push('<span class="badge badge-positive">Reviews</span>');
-        if (ds.has_user_data) badges.push('<span class="badge badge-category">Ratings</span>');
-        if (ds.has_behavior) badges.push('<span class="badge badge-neutral">Behavior</span>');
-
-        el.innerHTML = `
-            <div class="dataset-item-info">
-                <div class="dataset-item-name">${ds.name}</div>
-                <div class="dataset-item-meta">${ds.rows.toLocaleString()} rows</div>
-                <div class="dataset-item-badges">${badges.join('')}</div>
-            </div>
-            <button class="btn btn-sm btn-danger" data-id="${ds.id}">✕</button>
-        `;
-        el.querySelector('button').addEventListener('click', (e) => {
-            e.stopPropagation();
-            deleteDataset(ds.id);
-        });
-        datasetList.appendChild(el);
-    });
-
-    $('#stat-datasets').textContent = datasets.length;
-    $('#stat-rows').textContent = totalRows.toLocaleString();
-}
-
-async function deleteDataset(id) {
-    try {
-        await fetch(`${API}/api/datasets/${id}`, { method: 'DELETE' });
-        datasets = datasets.filter(d => d.id !== id);
-        renderDatasets();
-        updateStatus(false);
-        toast('Dataset removed', 'info');
-    } catch(e) {
-        toast('Failed to remove dataset', 'error');
-    }
-}
-
-async function buildModels() {
-    buildBtn.disabled = true;
-    buildBtn.innerHTML = '<span class="spinner"></span> Building...';
-    toast('Building models — this may take a moment...', 'info');
-
-    try {
-        const res = await fetch(`${API}/api/build`, { method: 'POST' });
-        if (!res.ok) { const e = await res.json(); throw new Error(e.detail || 'Build failed'); }
-        const data = await res.json();
-        toast(`Models built! ${data.items} items ready.`, 'success');
-        $('#stat-items').textContent = data.items;
-        updateStatus(true);
-    } catch(e) {
-        toast(`Build error: ${e.message}`, 'error');
-    }
-
-    buildBtn.disabled = false;
-    buildBtn.innerHTML = '<span class="btn-icon">⚡</span> Build Models';
-}
-
-// ── Search ───────────────────────────────────────────────────────
-function setupSearch() {
-    searchInput.addEventListener('input', () => {
-        clearTimeout(debounceTimer);
-        const q = searchInput.value.trim();
-        if (!q && document.activeElement !== searchInput) {
-            searchResults.classList.add('hidden');
-            searchInput.style.borderBottomLeftRadius = '';
-            searchInput.style.borderBottomRightRadius = '';
-        }
-        searchSpinner.classList.remove('hidden');
-        debounceTimer = setTimeout(() => searchItems(q), 350);
-    });
-
-    document.addEventListener('click', (e) => {
-        if (!searchSection.contains(e.target)) {
-            searchResults.classList.add('hidden');
-            searchInput.style.borderBottomLeftRadius = '';
-            searchInput.style.borderBottomRightRadius = '';
-        }
-    });
-
-    searchInput.addEventListener('focus', () => {
-        if (searchResults.children.length > 0) {
-            searchResults.classList.remove('hidden');
-            searchInput.style.borderBottomLeftRadius = '0';
-            searchInput.style.borderBottomRightRadius = '0';
-        }
-    });
-
-    searchInput.addEventListener('keydown', async (e) => {
-        if (e.key === 'Enter') {
-            e.preventDefault();
-            const query = searchInput.value.trim();
-            if (!query) return;
-
-            // Hide dropdown instantly
-            searchResults.classList.add('hidden');
-            searchInput.style.borderBottomLeftRadius = '';
-            searchInput.style.borderBottomRightRadius = '';
-
-            try {
-                // Resolve the best match for the loose query text
-                const res = await fetch(`${API}/api/search?q=${encodeURIComponent(query)}&top_n=1`);
-                const data = await res.json();
-                
-                if (data.results && data.results.length > 0 && !data.is_fallback) {
-                    const bestMatch = data.results[0].title;
-                    searchInput.value = bestMatch; // Update input with exact title
-                    getRecommendations(bestMatch); // Fetch recs for the exact title
-                } else {
-                    // Unmatched query or fallback results returned. 
-                    // Search using exactly what they typed.
-                    getRecommendations(query);
-                }
-            } catch(err) {
-                toast('Search failed. Please ensure the backend is running.', 'error');
-            }
-        }
-    });
-}
-
-async function searchItems(q) {
-    try {
-        const res = await fetch(`${API}/api/search?q=${encodeURIComponent(q)}&top_n=15`);
-        if (!res.ok) throw new Error('Search failed');
-        const data = await res.json();
-        renderSearchResults(data, q);
-    } catch(e) {
-        toast(`Search error: ${e.message}`, 'error');
-    }
-    searchSpinner.classList.add('hidden');
-}
-
-function renderSearchResults(data, q) {
-    const results = data.results;
-    searchResults.innerHTML = '';
-    
-    if (document.activeElement === searchInput) {
-        searchResults.classList.remove('hidden');
-        searchInput.style.borderBottomLeftRadius = '0';
-        searchInput.style.borderBottomRightRadius = '0';
-    }
-
-    if (!results.length) {
-        searchResults.innerHTML = '<p style="color:var(--text-muted);text-align:center;padding:1rem;">No items found.</p>';
-        return;
-    }
-
-    if (data.is_fallback && q && q.length > 0) {
-        const header = document.createElement('div');
-        header.style.padding = '8px 14px';
-        header.style.fontSize = '0.75rem';
-        header.style.color = 'var(--text-muted)';
-        header.style.background = '#f8fafc';
-        header.style.fontWeight = '600';
-        header.style.textTransform = 'uppercase';
-        header.style.borderBottom = '1px solid var(--border)';
-        header.textContent = `No exact matches for "${q}". Popular items:`;
-        searchResults.appendChild(header);
-    }
-
-    results.forEach((item, i) => {
-        const sentimentClass = item.avg_sentiment >= 0.05 ? 'positive' : item.avg_sentiment <= -0.05 ? 'negative' : 'neutral';
-        const sentimentLabel = sentimentClass === 'positive' ? '👍 Positive' : sentimentClass === 'negative' ? '👎 Negative' : '😐 Neutral';
-
-        const el = document.createElement('div');
-        el.className = 'search-item';
-        el.innerHTML = `
-            <div class="search-item-info">
-                <div class="search-item-title">${item.title}</div>
-                <div class="search-item-desc">${item.category ? `<span class="badge badge-category">${item.category}</span> ` : ''}${item.description || ''}</div>
-            </div>
-            <div class="search-item-scores">
-                ${renderStars(item.rating)}
-                <span class="badge badge-${sentimentClass}">${sentimentLabel}</span>
-            </div>
-        `;
-        el.addEventListener('click', () => {
-            searchInput.value = item.title;
-            searchResults.classList.add('hidden');
-            searchInput.style.borderBottomLeftRadius = '';
-            searchInput.style.borderBottomRightRadius = '';
-            getRecommendations(item.title);
-        });
-        searchResults.appendChild(el);
-    });
-}
-
-// ── Recommendations ──────────────────────────────────────────────
-async function getRecommendations(title) {
-    recSection.classList.remove('hidden');
-    recQuery.textContent = `for "${title}"`;
-    recGrid.innerHTML = '<div style="text-align:center;padding:2rem;"><div class="spinner" style="margin:0 auto;"></div></div>';
-    recSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
-
-    try {
-        const res = await fetch(`${API}/api/recommend/${encodeURIComponent(title)}?top_n=12`);
-        if (res.status === 404) {
-            renderRecommendations([]);
-            return;
-        }
-        if (!res.ok) throw new Error('Recommendation failed');
-        const data = await res.json();
-        renderRecommendations(data.recommendations);
-    } catch(e) {
-        recGrid.innerHTML = `<p style="color:var(--danger);text-align:center;padding:2rem;">${e.message}</p>`;
-    }
-}
-
-function renderRecommendations(recs) {
-    recGrid.innerHTML = '';
-    if (!recs || recs.length === 0) {
-        recGrid.innerHTML = '<p style="color:var(--text-muted);text-align:center;padding:2rem;grid-column:1/-1;">No recommendations found matching your query.</p>';
-        return;
-    }
-    recs.forEach((rec, i) => {
-        const sentimentClass = rec.sentiment_score >= 0.525 ? 'positive' : rec.sentiment_score <= 0.475 ? 'negative' : 'neutral';
-        const sentimentEmoji = sentimentClass === 'positive' ? '👍' : sentimentClass === 'negative' ? '👎' : '😐';
-
-        let reviewsHtml = '';
-        if (rec.top_reviews && rec.top_reviews.length > 0) {
-            reviewsHtml = '<div class="rec-card-reviews">';
-            rec.top_reviews.forEach(r => {
-                reviewsHtml += `<div class="rec-review-item">"${r}"</div>`;
-            });
-            reviewsHtml += '</div>';
-        }
-
-        const card = document.createElement('div');
-        card.className = 'rec-card';
-        card.style.animationDelay = `${i * 0.08}s`;
-        card.innerHTML = `
-            <div class="rec-card-header">
-                <div class="rec-card-rank">#${i + 1} Recommendation</div>
-                ${rec.category ? `<span class="badge badge-category">${rec.category}</span>` : ''}
-            </div>
-            <div class="rec-card-title">${rec.title}</div>
-            <div class="rec-card-category">
-                ${renderStars(rec.rating)}
-                <span class="badge badge-${sentimentClass}">${sentimentEmoji}</span>
-            </div>
-            <div class="rec-card-desc">${rec.description || ''}</div>
-            ${reviewsHtml}
-            <div class="rec-card-bottom">
-                <div class="score-bars">
-                    ${scoreBar('Content', rec.content_score, 'content')}
-                    ${scoreBar('Collab', rec.collab_score, 'collab')}
-                    ${scoreBar('Sentiment', rec.sentiment_score, 'sentiment')}
-                    ${scoreBar('Hybrid', rec.hybrid_score, 'hybrid')}
-                </div>
-                <div class="rec-card-footer">
-                    <div class="hybrid-label">Hybrid Score</div>
-                    <div class="hybrid-big">${(rec.hybrid_score * 100).toFixed(1)}%</div>
-                    <button class="btn btn-sm btn-ghost" onclick="getRecommendations('${rec.title.replace(/'/g, "\\'")}')">
-                        Find Similar →
-                    </button>
-                </div>
-            </div>
-        `;
-        recGrid.appendChild(card);
-    });
-}
-
-function scoreBar(label, value, cls) {
-    const pct = Math.round(value * 100);
-    return `
-        <div class="score-row">
-            <span class="score-label">${label}</span>
-            <div class="score-bar-bg">
-                <div class="score-bar-fill ${cls}" style="width: ${pct}%"></div>
-            </div>
-            <span class="score-value">${pct}%</span>
-        </div>
-    `;
-}
-
-// ── Stars ────────────────────────────────────────────────────────
 function renderStars(rating) {
-    const full = Math.round(rating || 0);
-    let html = '<div class="stars">';
-    for (let i = 1; i <= 5; i++) {
-        html += `<span class="star ${i <= full ? 'filled' : ''}">★</span>`;
+    const full = Math.floor(rating);
+    const half = rating - full >= 0.5;
+    let html = '';
+    for (let i = 0; i < 5; i++) {
+        if (i < full) html += '<span class="star filled">★</span>';
+        else if (i === full && half) html += '<span class="star filled">★</span>';
+        else html += '<span class="star">★</span>';
     }
-    html += `</div>`;
     return html;
 }
 
-// ── Weight Sliders ───────────────────────────────────────────────
-function setupWeights() {
-    ['alpha', 'beta', 'gamma'].forEach(name => {
-        const slider = $(`#weight-${name}`);
-        const display = $(`#val-${name}`);
-        slider.addEventListener('input', () => {
-            display.textContent = (slider.value / 100).toFixed(2);
-        });
-        slider.addEventListener('change', updateWeights);
-    });
+function sentimentBadge(score) {
+    if (score > 0.05) return '<span class="product-card__sentiment sentiment-positive">Positive</span>';
+    if (score < -0.05) return '<span class="product-card__sentiment sentiment-negative">Negative</span>';
+    return '<span class="product-card__sentiment sentiment-neutral">Neutral</span>';
 }
 
-async function updateWeights() {
-    const a = $('#weight-alpha').value / 100;
-    const b = $('#weight-beta').value / 100;
-    const g = $('#weight-gamma').value / 100;
+function categoryIcon(cat) {
+    const c = (cat || '').toLowerCase();
+    if (c.includes('book') || c.includes('fiction') || c.includes('literature')) return '📚';
+    if (c.includes('tech') || c.includes('computer') || c.includes('electro')) return '💻';
+    if (c.includes('music') || c.includes('audio')) return '🎵';
+    if (c.includes('movie') || c.includes('film') || c.includes('video')) return '🎬';
+    if (c.includes('game') || c.includes('toy')) return '🎮';
+    if (c.includes('food') || c.includes('kitchen') || c.includes('cook')) return '🍳';
+    if (c.includes('sport') || c.includes('fitness')) return '⚽';
+    if (c.includes('health') || c.includes('beauty')) return '💊';
+    if (c.includes('cloth') || c.includes('fashion')) return '👕';
+    if (c.includes('home') || c.includes('garden')) return '🏡';
+    return '📦';
+}
 
-    try {
-        await fetch(`${API}/api/weights`, {
+// ── API Helpers ─────────────────────────────────────────────────────
+const API = {
+    async get(url) {
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`API error: ${res.status}`);
+        return res.json();
+    },
+    async post(url, data) {
+        const res = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data),
+        });
+        if (!res.ok) throw new Error(`API error: ${res.status}`);
+        return res.json();
+    },
+    async put(url, data) {
+        const res = await fetch(url, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ alpha: a, beta: b, gamma: g }),
+            body: JSON.stringify(data),
         });
-        toast('Weights updated', 'info');
+        if (!res.ok) throw new Error(`API error: ${res.status}`);
+        return res.json();
+    },
+};
 
-        // If recommendations are visible, re-fetch
-        const currentQuery = recQuery.textContent.replace('for "', '').replace('"', '');
-        if (currentQuery && !recSection.classList.contains('hidden')) {
-            getRecommendations(currentQuery);
+// ── Auth ────────────────────────────────────────────────────────────
+async function initAuth() {
+    if (!sbClient) {
+        console.warn('Supabase client unavailable — auth disabled');
+        els.authLabel.textContent = 'Sign In';
+        return;
+    }
+    try {
+        const { data: { session } } = await sbClient.auth.getSession();
+
+        if (session) {
+            setUser(session.user);
+        } else {
+            // Auto guest sign-in
+            const { data, error } = await sbClient.auth.signInAnonymously();
+            if (error) {
+                console.warn('Guest login failed:', error.message);
+                els.authLabel.textContent = 'Sign In';
+            } else {
+                setUser(data.user);
+            }
         }
-    } catch(e) {
-        toast('Failed to update weights', 'error');
+    } catch (err) {
+        console.warn('Auth init failed:', err.message);
+        els.authLabel.textContent = 'Sign In';
     }
 }
 
-// ── Toggle datasets section ──────────────────────────────────────
-function setupToggle() {
-    const btn = $('#toggle-datasets');
-    const body = $('#dataset-body');
-    btn.addEventListener('click', () => {
-        body.classList.toggle('hidden');
-        btn.textContent = body.classList.contains('hidden') ? '▶' : '▼';
+function setUser(user) {
+    state.user = user;
+    state.isGuest = user?.is_anonymous || !user?.email;
+
+    if (state.isGuest) {
+        els.authLabel.textContent = 'Guest';
+    } else {
+        els.authLabel.textContent = user.email?.split('@')[0] || 'User';
+    }
+}
+
+async function handleAuth(e) {
+    e.preventDefault();
+    els.authError.hidden = true;
+    els.authSubmit.disabled = true;
+    els.authSubmit.textContent = 'Please wait...';
+
+    const email = els.authEmail.value.trim();
+    const password = els.authPassword.value;
+
+    try {
+        let result;
+        if (state.isAuthSignUp) {
+            result = await sbClient.auth.signUp({
+                email,
+                password,
+                options: { data: { display_name: email.split('@')[0] } },
+            });
+        } else {
+            result = await sbClient.auth.signInWithPassword({ email, password });
+        }
+
+        if (result.error) throw result.error;
+
+        setUser(result.data.user);
+        els.authModal.hidden = true;
+        toast(state.isAuthSignUp ? 'Account created!' : 'Signed in!', 'success');
+    } catch (err) {
+        els.authError.textContent = err.message;
+        els.authError.hidden = false;
+    } finally {
+        els.authSubmit.disabled = false;
+        els.authSubmit.textContent = state.isAuthSignUp ? 'Sign Up' : 'Sign In';
+    }
+}
+
+function toggleAuthMode() {
+    state.isAuthSignUp = !state.isAuthSignUp;
+    els.modalTitle.textContent = state.isAuthSignUp ? 'Create Account' : 'Sign In';
+    els.authSubmit.textContent = state.isAuthSignUp ? 'Sign Up' : 'Sign In';
+    els.authToggleText.textContent = state.isAuthSignUp ? 'Already have an account?' : "Don't have an account?";
+    els.authToggleBtn.textContent = state.isAuthSignUp ? 'Sign In' : 'Sign Up';
+    els.authError.hidden = true;
+}
+
+// ── Type-to-Search (Global Keyboard Capture) ────────────────────────
+function initTypeToSearch() {
+    document.addEventListener('keydown', (e) => {
+        const tag = e.target.tagName;
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+        if (e.key === ' ' || e.key === 'Escape' || e.ctrlKey || e.altKey || e.metaKey) return;
+
+        if (e.key === 'Backspace') {
+            els.searchInput.focus();
+            return;
+        }
+
+        if (e.key.length === 1) {
+            els.searchInput.focus();
+            // The character will naturally be typed into the input
+        }
     });
 }
+
+// ── Search ──────────────────────────────────────────────────────────
+async function handleSearch(query) {
+    if (!query || query.length < 1) {
+        closeSearchDropdown();
+        return;
+    }
+
+    clearTimeout(state.searchTimer);
+    state.searchTimer = setTimeout(async () => {
+        try {
+            const data = await API.get(`/api/search?q=${encodeURIComponent(query)}&limit=8`);
+            state.searchResults = data.results || [];
+            state.selectedSearchIdx = -1;
+            renderSearchDropdown(state.searchResults, query);
+        } catch {
+            closeSearchDropdown();
+        }
+    }, 200);
+}
+
+function renderSearchDropdown(results, query) {
+    if (!results.length) {
+        els.searchDropdown.innerHTML = `
+            <div style="padding:20px;text-align:center;color:var(--text-muted);font-size:13px;">
+                No results for "${query}"
+            </div>`;
+        els.searchDropdown.classList.add('active');
+        return;
+    }
+
+    els.searchDropdown.innerHTML = results.map((r, i) => `
+        <div class="search-result ${i === state.selectedSearchIdx ? 'active' : ''}"
+             data-title="${r.title}" data-idx="${i}">
+            <span style="font-size:20px;">${categoryIcon(r.category)}</span>
+            <div class="search-result__info">
+                <div class="search-result__title">${highlightMatch(r.title, query)}</div>
+                <div class="search-result__meta">
+                    ★ ${(r.rating || 0).toFixed(1)}
+                    ${r.category ? `· <span class="search-result__category">${r.category}</span>` : ''}
+                </div>
+            </div>
+        </div>
+    `).join('');
+    els.searchDropdown.classList.add('active');
+
+    // Click handlers
+    els.searchDropdown.querySelectorAll('.search-result').forEach((el) => {
+        el.addEventListener('click', () => {
+            const title = el.dataset.title;
+            selectSearchResult(title);
+        });
+    });
+}
+
+function highlightMatch(text, query) {
+    if (!query) return text;
+    const regex = new RegExp(`(${query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi');
+    return text.replace(regex, '<strong>$1</strong>');
+}
+
+function selectSearchResult(title) {
+    els.searchInput.value = title;
+    closeSearchDropdown();
+    loadSearchResults(title);
+    loadRecommendations(title);
+}
+
+function closeSearchDropdown() {
+    els.searchDropdown.classList.remove('active');
+    state.selectedSearchIdx = -1;
+}
+
+function handleSearchKeydown(e) {
+    const results = state.searchResults;
+    if (!results.length || !els.searchDropdown.classList.contains('active')) return;
+
+    if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        state.selectedSearchIdx = Math.min(state.selectedSearchIdx + 1, results.length - 1);
+        renderSearchDropdown(results, els.searchInput.value);
+    } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        state.selectedSearchIdx = Math.max(state.selectedSearchIdx - 1, -1);
+        renderSearchDropdown(results, els.searchInput.value);
+    } else if (e.key === 'Enter' && state.selectedSearchIdx >= 0) {
+        e.preventDefault();
+        selectSearchResult(results[state.selectedSearchIdx].title);
+    } else if (e.key === 'Escape') {
+        closeSearchDropdown();
+    }
+}
+
+// ── Product Loading ─────────────────────────────────────────────────
+async function loadProducts(append = false) {
+    if (!append) {
+        els.productGrid.innerHTML = '';
+        els.skeletonLoader.hidden = false;
+        state.page = 1;
+    }
+
+    try {
+        const data = await API.get(`/api/search?q=&limit=${state.perPage}&offset=${(state.page - 1) * state.perPage}`);
+        const products = data.results || [];
+        state.totalProducts = data.total || products.length;
+
+        if (!append) {
+            els.skeletonLoader.hidden = true;
+        }
+
+        renderProducts(products, append);
+        els.productCount.textContent = `${state.products.length} products loaded`;
+
+        // Show load more if there might be more
+        els.loadMoreContainer.hidden = products.length < state.perPage;
+    } catch (err) {
+        els.skeletonLoader.hidden = true;
+        toast('Failed to load products', 'error');
+    }
+}
+
+async function loadSearchResults(query) {
+    els.productGrid.innerHTML = '';
+    els.skeletonLoader.hidden = false;
+    els.productsTitle.textContent = `Results for "${query}"`;
+
+    try {
+        const data = await API.get(`/api/search?q=${encodeURIComponent(query)}&limit=40`);
+        const products = data.results || [];
+        els.skeletonLoader.hidden = true;
+        els.productCount.textContent = `${products.length} results`;
+        state.products = [];
+        renderProducts(products, false);
+        els.loadMoreContainer.hidden = true;
+    } catch {
+        els.skeletonLoader.hidden = true;
+        toast('Search failed', 'error');
+    }
+}
+
+function renderProducts(products, append) {
+    if (!append) state.products = [];
+
+    const fragment = document.createDocumentFragment();
+
+    products.forEach((p, i) => {
+        state.products.push(p);
+        const card = document.createElement('div');
+        card.className = 'product-card';
+        card.style.animationDelay = `${i * 50}ms`;
+        card.innerHTML = `
+            <div class="product-card__image">
+                ${categoryIcon(p.category)}
+            </div>
+            <div class="product-card__body">
+                ${p.category ? `<span class="product-card__category">${p.category}</span>` : ''}
+                <h3 class="product-card__title">${p.title || 'Untitled'}</h3>
+                <p class="product-card__desc">${p.description || 'No description available.'}</p>
+                <div class="product-card__footer">
+                    <div class="product-card__rating">
+                        <div class="star-rating">${renderStars(p.rating || 0)}</div>
+                        <span class="rating-value">${(p.rating || 0).toFixed(1)}</span>
+                    </div>
+                    ${sentimentBadge(p.avg_sentiment || 0)}
+                </div>
+            </div>
+            <div class="product-card__actions">
+                <button class="btn--add-cart" data-title="${p.title}">
+                    Get Recommendations
+                </button>
+            </div>
+        `;
+
+        // Click → get recommendations
+        card.querySelector('.btn--add-cart').addEventListener('click', (e) => {
+            e.stopPropagation();
+            const title = e.target.dataset.title;
+            loadRecommendations(title);
+            toast(`Finding recommendations for "${title.substring(0, 40)}..."`, 'info');
+        });
+
+        card.addEventListener('click', () => {
+            loadRecommendations(p.title);
+        });
+
+        fragment.appendChild(card);
+    });
+
+    els.productGrid.appendChild(fragment);
+}
+
+// ── Recommendations ─────────────────────────────────────────────────
+async function loadRecommendations(title) {
+    if (!state.modelReady) {
+        toast('Build models first to get recommendations', 'info');
+        return;
+    }
+
+    els.recsSection.hidden = false;
+    els.recsStrip.innerHTML = '<div style="padding:16px;color:var(--text-muted);font-size:13px;">Loading recommendations...</div>';
+
+    try {
+        const data = await API.get(`/api/recommend/${encodeURIComponent(title)}?top_n=12`);
+        const recs = data.recommendations || [];
+
+        if (!recs.length) {
+            els.recsStrip.innerHTML = '<div style="padding:16px;color:var(--text-muted);">No recommendations found.</div>';
+            return;
+        }
+
+        els.recsStrip.innerHTML = recs.map((r) => `
+            <div class="rec-card" data-title="${r.title}">
+                <div class="rec-card__title">${r.title}</div>
+                <div class="rec-card__rating">
+                    <div class="star-rating">${renderStars(r.rating || 0)}</div>
+                    <span class="rating-value">${(r.rating || 0).toFixed(1)}</span>
+                </div>
+                <div class="rec-card__score">
+                    Score: ${(r.hybrid_score || 0).toFixed(3)}
+                    · Content: ${(r.content_score || 0).toFixed(2)}
+                    · Collab: ${(r.collab_score || 0).toFixed(2)}
+                </div>
+            </div>
+        `).join('');
+
+        // Click to chain recommendations
+        els.recsStrip.querySelectorAll('.rec-card').forEach((card) => {
+            card.addEventListener('click', () => {
+                loadRecommendations(card.dataset.title);
+            });
+        });
+
+        // Scroll to recs
+        els.recsSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    } catch {
+        els.recsStrip.innerHTML = '<div style="padding:16px;color:var(--text-muted);">Could not load recommendations.</div>';
+    }
+}
+
+// ── Upload & Build ──────────────────────────────────────────────────
+async function handleUpload(file) {
+    toast(`Uploading ${file.name}...`, 'info');
+    const form = new FormData();
+    form.append('file', file);
+
+    try {
+        const res = await fetch('/api/upload', { method: 'POST', body: form });
+        if (!res.ok) throw new Error('Upload failed');
+        const data = await res.json();
+        toast(`Imported ${data.imported?.toLocaleString()} products!`, 'success');
+        checkStatus();
+    } catch (err) {
+        toast('Upload failed: ' + err.message, 'error');
+    }
+}
+
+async function handleBuild() {
+    els.buildBtn.disabled = true;
+    els.buildBtn.innerHTML = `
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="spin">
+            <path d="M21 12a9 9 0 11-6.219-8.56"/>
+        </svg>
+        Building...`;
+
+    try {
+        const data = await API.post('/api/build', {});
+        state.modelReady = true;
+        toast(`Models built in ${data.build_time_seconds}s — ${data.items?.toLocaleString()} items`, 'success');
+        updateStatus('ready', `Ready — ${data.items?.toLocaleString()} products`);
+        loadProducts();
+    } catch (err) {
+        toast('Build failed: ' + err.message, 'error');
+    } finally {
+        els.buildBtn.disabled = false;
+        els.buildBtn.innerHTML = `
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
+            </svg>
+            Build Models`;
+    }
+}
+
+// ── Status ──────────────────────────────────────────────────────────
+async function checkStatus() {
+    try {
+        const data = await API.get('/api/status');
+        const count = data.product_count || 0;
+
+        if (data.model_ready) {
+            state.modelReady = true;
+            updateStatus('ready', `Ready — ${count.toLocaleString()} products`);
+            loadProducts();
+        } else if (count > 0) {
+            updateStatus('has-data', `${count.toLocaleString()} products — Build models to start`);
+            loadProducts();
+        } else {
+            updateStatus('', 'No data — Upload a CSV or JSON dataset');
+            els.skeletonLoader.hidden = true;
+            els.productGrid.innerHTML = `
+                <div style="grid-column:1/-1;text-align:center;padding:60px 20px;color:var(--text-muted);">
+                    <div style="font-size:48px;margin-bottom:16px;">📦</div>
+                    <div style="font-size:16px;font-weight:600;margin-bottom:8px;color:var(--text-secondary);">No products yet</div>
+                    <div style="font-size:13px;">Upload a CSV or JSON dataset to get started</div>
+                </div>`;
+        }
+    } catch {
+        updateStatus('error', 'Backend offline');
+    }
+}
+
+function updateStatus(cls, text) {
+    els.statusDot.className = `status-dot ${cls}`;
+    els.statusText.textContent = text;
+}
+
+// ── Weight Controls ─────────────────────────────────────────────────
+async function handleWeightChange() {
+    const a = parseInt(els.weightAlpha.value);
+    const b = parseInt(els.weightBeta.value);
+    const g = parseInt(els.weightGamma.value);
+
+    try {
+        await API.put('/api/weights', { alpha: a / 100, beta: b / 100, gamma: g / 100 });
+    } catch {}
+}
+
+// ── Event Listeners ─────────────────────────────────────────────────
+function bindEvents() {
+    // Search
+    els.searchInput.addEventListener('input', (e) => handleSearch(e.target.value));
+    els.searchInput.addEventListener('keydown', handleSearchKeydown);
+    els.searchInput.addEventListener('focus', () => {
+        if (els.searchInput.value) handleSearch(els.searchInput.value);
+    });
+
+    // Close dropdown on outside click
+    document.addEventListener('click', (e) => {
+        if (!e.target.closest('.header__search')) closeSearchDropdown();
+    });
+
+    // Auth
+    els.authBtn.addEventListener('click', () => {
+        if (state.isGuest) {
+            els.authModal.hidden = false;
+        } else {
+            // Logged in → sign out
+            sbClient.auth.signOut().then(() => {
+                state.user = null;
+                state.isGuest = true;
+                els.authLabel.textContent = 'Sign In';
+                toast('Signed out', 'info');
+                initAuth(); // Re-login as guest
+            });
+        }
+    });
+
+    els.authForm.addEventListener('submit', handleAuth);
+    els.authToggleBtn.addEventListener('click', toggleAuthMode);
+    els.modalClose.addEventListener('click', () => { els.authModal.hidden = true; });
+    els.authModal.addEventListener('click', (e) => {
+        if (e.target === els.authModal) els.authModal.hidden = true;
+    });
+
+    // Upload
+    els.uploadBtn.addEventListener('click', () => els.fileInput.click());
+    els.fileInput.addEventListener('change', (e) => {
+        if (e.target.files[0]) handleUpload(e.target.files[0]);
+        e.target.value = '';
+    });
+
+    // Build
+    els.buildBtn.addEventListener('click', handleBuild);
+
+    // Load more
+    els.loadMoreBtn.addEventListener('click', () => {
+        state.page++;
+        loadProducts(true);
+    });
+
+    // Weights
+    [els.weightAlpha, els.weightBeta, els.weightGamma].forEach((slider) => {
+        slider.addEventListener('change', handleWeightChange);
+    });
+}
+
+// ── CSS spin animation ──────────────────────────────────────────────
+const spinStyle = document.createElement('style');
+spinStyle.textContent = `@keyframes spin { to { transform: rotate(360deg); } } .spin { animation: spin 1s linear infinite; }`;
+document.head.appendChild(spinStyle);
+
+// ── Init ────────────────────────────────────────────────────────────
+async function init() {
+    bindEvents();
+    initTypeToSearch();
+
+    // Initialize Supabase client from backend config (no hardcoded keys)
+    await initSupabase();
+
+    // Run auth and status independently — neither blocks the other
+    initAuth().catch((e) => console.warn('Auth error:', e));
+    checkStatus().catch((e) => console.warn('Status error:', e));
+}
+
+document.addEventListener('DOMContentLoaded', init);
